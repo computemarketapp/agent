@@ -1,0 +1,17 @@
+{
+  "name": "@computemarket/agent",
+  "version": "0.1.0",
+  "description": "ComputeMarket operator agent — prove your GPU, earn rewards.",
+  "type": "module",
+  "bin": {
+    "computemarket": "./cli.mjs"
+  },
+  "files": ["cli.mjs", "challenge.py", "README.md"],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "license": "MIT"
+}
