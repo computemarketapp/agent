@@ -163,7 +163,12 @@ async function cmdStart(operatorArg) {
     process.exit(1);
   }
   const probe = probeEnvironment();
-  const gpu = probe.gpus[0]?.name ?? "SIMULATED H100";
+  // COMPUTEMARKET_SIM_GPU is a dev override; real operators need real silicon
+  const gpu = probe.gpus[0]?.name ?? process.env.COMPUTEMARKET_SIM_GPU;
+  if (!gpu) {
+    console.error("error: no NVIDIA GPU detected (nvidia-smi not available). A working GPU is required to operate.");
+    process.exit(1);
+  }
   console.log(`\nComputeMarket agent\n`);
   console.log(`  GPU        ${gpu}${(probe.gpus.length || 1) > 1 ? ` ×${probe.gpus.length}` : ""}`);
 
