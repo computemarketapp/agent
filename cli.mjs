@@ -80,6 +80,7 @@ const onchainOperator = (cfg) =>
 
 // ---------- commands ----------
 function cmdCheck() {
+  console.log("Measuring device hardware… (a few seconds)");
   const p = probeEnvironment();
   const gpu = p.gpus[0];
   console.log(`GPU         ${gpu ? `${gpu.name} ×${p.gpus.length} (${gpu.vram}, driver ${gpu.driver})` : "none detected — nvidia-smi failed"}`);
@@ -162,6 +163,8 @@ async function cmdStart(operatorArg) {
     console.error("error: this box is not linked yet.\n  run:  computemarket link <your-wallet-address>");
     process.exit(1);
   }
+  console.log(`\nComputeMarket agent\n`);
+  console.log("  Measuring device hardware… (a few seconds)");
   const probe = probeEnvironment();
   // COMPUTEMARKET_SIM_GPU is a dev override; real operators need real silicon
   const gpu = probe.gpus[0]?.name ?? process.env.COMPUTEMARKET_SIM_GPU;
@@ -169,7 +172,6 @@ async function cmdStart(operatorArg) {
     console.error("error: no NVIDIA GPU detected (nvidia-smi not available). A working GPU is required to operate.");
     process.exit(1);
   }
-  console.log(`\nComputeMarket agent\n`);
   console.log(`  GPU        ${gpu}${(probe.gpus.length || 1) > 1 ? ` ×${probe.gpus.length}` : ""}`);
 
   // chain config comes from the registry, so contract redeploys need no reinstall
@@ -206,6 +208,7 @@ async function cmdStart(operatorArg) {
     });
   }
 
+  console.log("  Verifying with the network… (this settles onchain, ~10 seconds)");
   // ponytail: real version calls nvtrust -> NVIDIA NRAS here for a signed JWT
   const token = { gpu, gpuCount: probe.gpus.length || 1, probe, boxKey: box.address, nonce: Date.now() % 1e9, nrasSig: "MOCK_NRAS_SIGNATURE" };
   const attest = await fetch(`${REGISTRY_URL}/attest`, {
@@ -229,6 +232,7 @@ async function cmdStart(operatorArg) {
     if (!probe.cudaAvailable) {
       out = { ok: false, error: "torch not installed" }; // clean skip, no exec attempt
     } else {
+      if (!quiet) console.log("  Proving hardware capability… (VRAM + throughput test, up to 2 minutes)");
       try {
         const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "challenge.py");
         out = JSON.parse(sh("python3", [script, c.nonce, String(c.vramGB)], 120_000).split("\n").pop());
