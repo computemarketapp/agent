@@ -293,7 +293,10 @@ async function cmdStart(operatorArg) {
   };
   await runChallenge();
 
-  console.log(`\n  Online — earning at weight ${attestBody.weight}. Stop: Ctrl+C or \`computemarket off\`\n`);
+  console.log(`\n  Proven ✓ — earning at weight ${attestBody.weight}.`);
+  console.log("  You can close this terminal — or shut the machine down. Earnings continue either way.");
+  console.log("  (Staying open just signals availability for future jobs; optional in this phase.)");
+  console.log("  Before claiming: run `computemarket on` once more on this same machine to re-prove it.\n");
   for (let seq = 0; ; seq++) {
     const payload = { operator, seq, ts: Date.now() };
     const r = await fetch(`${REGISTRY_URL}/heartbeat`, {
