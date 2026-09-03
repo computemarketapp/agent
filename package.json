@@ -2,6 +2,12 @@
   "name": "@computemarket/agent",
   "version": "0.1.0",
   "description": "ComputeMarket operator agent — prove your GPU, earn rewards.",
+  "homepage": "https://computemarket.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/computemarketapp/agent.git"
+  },
+  "keywords": ["gpu", "compute", "operator", "robinhood-chain"],
   "type": "module",
   "bin": {
     "computemarket": "./cli.mjs"
