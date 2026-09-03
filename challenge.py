@@ -25,7 +25,9 @@ def main():
     seed = int(nonce_hex[:15], 16)  # nonce drives the data: precomputation is useless
     torch.manual_seed(seed)
 
-    result = {"ok": True, "nonce": nonce_hex, "device": torch.cuda.get_device_name(0)}
+    # torch/cuda versions recorded so a spot-check verifier can reproduce the run
+    result = {"ok": True, "nonce": nonce_hex, "device": torch.cuda.get_device_name(0),
+              "torch": torch.__version__, "cudaRt": torch.version.cuda}
 
     # 1. VRAM claim: allocate what an honest card of this class must hold.
     # A smaller card OOMs here — it cannot fake capacity it does not have.
@@ -48,6 +50,9 @@ def main():
     for _ in range(5):  # warmup: let clocks and autotuning settle
         a @ b
     torch.cuda.synchronize()
+    # second nonce-bound checksum: a sparse sample of the full product binds the matmul
+    # work itself, so a verifier re-running with the same nonce can compare both sums
+    result["matmulChecksum"] = float((a @ b)[::997, ::997].double().sum().item())
 
     samples = []
     for _ in range(20):

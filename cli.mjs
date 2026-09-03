@@ -15,7 +15,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
 
-const REGISTRY_URL = (process.env.REGISTRY_URL ?? "https://computemarket-production.up.railway.app").replace(/\/$/, "");
+// rebuilt from parsed URL parts: a hostile env var can't smuggle control chars into
+// fetch targets or the systemd unit that `service` prints
+const REGISTRY_URL = (() => {
+  const raw = process.env.REGISTRY_URL ?? "https://computemarket-production.up.railway.app";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("not http(s)");
+    return (u.origin + u.pathname).replace(/\/+$/, "");
+  } catch {
+    console.error(`error: REGISTRY_URL is not a valid http(s) URL: ${raw}`);
+    process.exit(1);
+  }
+})();
+const SITE = "https://computemarket.app";
 const HOME = process.env.COMPUTEMARKET_HOME ?? path.join(homedir(), ".computemarket");
 const KEY_FILE = path.join(HOME, "box-key.json");
 const CONF_FILE = path.join(HOME, "config.json"); // remembers the operator wallet after `link`
@@ -56,8 +69,11 @@ function probeEnvironment() {
 }
 
 function boxKey() {
-  if (!existsSync(HOME)) mkdirSync(HOME, { recursive: true });
-  if (existsSync(KEY_FILE)) return new ethers.Wallet(JSON.parse(readFileSync(KEY_FILE)).privateKey);
+  if (!existsSync(HOME)) mkdirSync(HOME, { recursive: true, mode: 0o700 });
+  if (existsSync(KEY_FILE)) {
+    try { return new ethers.Wallet(JSON.parse(readFileSync(KEY_FILE)).privateKey); }
+    catch { console.error(`error: ${KEY_FILE} is corrupted — delete it and run \`computemarket link\` again`); process.exit(1); }
+  }
   const w = ethers.Wallet.createRandom();
   writeFileSync(KEY_FILE, JSON.stringify({ privateKey: w.privateKey }), { mode: 0o600 });
   console.log(`[agent] new box key created at ${KEY_FILE}`);
@@ -66,13 +82,17 @@ function boxKey() {
 
 const readConf = () => { try { return JSON.parse(readFileSync(CONF_FILE)); } catch { return {}; } };
 const saveConf = (o) => {
-  if (!existsSync(HOME)) mkdirSync(HOME, { recursive: true });
+  if (!existsSync(HOME)) mkdirSync(HOME, { recursive: true, mode: 0o700 });
   writeFileSync(CONF_FILE, JSON.stringify({ ...readConf(), ...o }, null, 2));
 };
 
 const getConfig = async () => {
   const cfg = await fetch(`${REGISTRY_URL}/config`).then((r) => r.json()).catch(() => null);
   if (!cfg?.registry) { console.error(`error: cannot reach the ComputeMarket registry at ${REGISTRY_URL}`); process.exit(1); }
+  // registry is trusted for chain config (phase-1 design) — but a garbage/hijacked
+  // response must not aim us at an arbitrary internal endpoint or crash ethers
+  const rpcOk = /^https:\/\//.test(cfg.rpc ?? "") || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/.test(cfg.rpc ?? "");
+  if (!ethers.isAddress(cfg.registry) || !rpcOk) { console.error("error: registry returned an invalid chain config"); process.exit(1); }
   return cfg;
 };
 const onchainOperator = (cfg) =>
@@ -110,7 +130,10 @@ Environment=REGISTRY_URL=${REGISTRY_URL}
 ExecStart=${process.execPath} ${path.join(dir, "cli.mjs")} start
 Restart=always
 RestartSec=10
-User=${process.env.USER ?? "root"}
+User=${os.userInfo().username}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target`);
@@ -142,7 +165,10 @@ async function cmdLink(operator) {
   }).catch(() => null);
 
   console.log(`\n  BOX KEY:  ${box.address}`);
-  if (cfg.site) console.log(`  LINK IT:  ${cfg.site}/?box=${box.address}`);
+  // pinned site: a hijacked registry must not be able to print a wallet-drainer link.
+  // Operators who explicitly point at a custom registry get that registry's site.
+  const site = process.env.REGISTRY_URL ? cfg.site : SITE;
+  if (site) console.log(`  LINK IT:  ${site}/?box=${box.address}`);
   console.log(`\nOpen the site — it should already show this box was detected. Click Link.`);
   console.log("(You must have staked first — the link binds this machine to your stake.)");
   console.log("\nWaiting for the link transaction...");
@@ -188,6 +214,14 @@ async function cmdStart(operatorArg) {
 
   // pid + graceful shutdown: `computemarket off` (or Ctrl+C) tells the registry
   // immediately instead of leaving the watchdog to notice ~10s later
+  try {
+    const old = parseInt(readFileSync(PID_FILE, "utf8"), 10);
+    if (Number.isInteger(old) && old > 0) {
+      process.kill(old, 0); // throws unless that pid is alive
+      console.error(`error: agent already running (pid ${old}) — run \`computemarket off\` first`);
+      process.exit(1);
+    }
+  } catch { /* no pid file, or stale */ }
   writeFileSync(PID_FILE, String(process.pid));
   const goodbye = async () => {
     const payload = { operator, bye: true, ts: Date.now() };
@@ -210,11 +244,12 @@ async function cmdStart(operatorArg) {
 
   console.log("  Verifying with the network… (this settles onchain, ~10 seconds)");
   // ponytail: real version calls nvtrust -> NVIDIA NRAS here for a signed JWT
-  const token = { gpu, gpuCount: probe.gpus.length || 1, probe, boxKey: box.address, nonce: Date.now() % 1e9, nrasSig: "MOCK_NRAS_SIGNATURE" };
+  // ts lets the registry reject stale replays of this signed token
+  const token = { gpu, gpuCount: probe.gpus.length || 1, probe, boxKey: box.address, ts: Date.now(), nonce: Date.now() % 1e9, nrasSig: "MOCK_NRAS_SIGNATURE" };
   const attest = await fetch(`${REGISTRY_URL}/attest`, {
     method: "POST", body: JSON.stringify({ operator, token, boxSig: await box.signMessage(JSON.stringify(token)) }),
   });
-  const attestBody = await attest.json();
+  const attestBody = await attest.json().catch(() => ({}));
   if (!attest.ok) {
     console.error(`  Verified   ✗ ${attestBody.error ?? "attestation rejected"}`);
     process.exit(1);
@@ -224,25 +259,34 @@ async function cmdStart(operatorArg) {
   else if (attestBody.jobReadyReasons?.length)
     console.log(`  Job-ready  not yet — ${attestBody.jobReadyReasons.join(", ")}`);
 
-  const runChallenge = async (quiet = false) => {
+  // one-shot: hardware is proven once per `on`, not patrolled — the next proof is
+  // only needed at claim time ("same box" check), which re-running `on` provides
+  const runChallenge = async () => {
     const c = await fetch(`${REGISTRY_URL}/challenge?operator=${operator}`).then((r) => r.json()).catch(() => null);
     if (!c?.nonce) return;
+    const nonce = String(c.nonce).slice(0, 64);
+    // clamp to the card we actually see: a hijacked registry must not be able to
+    // drive OOM churn with an absurd vramGB ask (registry-trusted posture is phase-1
+    // design; this is belt-and-suspenders)
+    const detectedVramGB = (parseInt(probe.gpus[0]?.vram) || 0) / 1024; // "81920 MiB" → GB
+    let vramGB = Number(c.vramGB) || 0;
+    if (detectedVramGB) vramGB = Math.min(vramGB, Math.ceil(detectedVramGB * 1.1));
     let out;
     const started = Date.now();
     if (!probe.cudaAvailable) {
       out = { ok: false, error: "torch not installed" }; // clean skip, no exec attempt
     } else {
-      if (!quiet) console.log("  Proving hardware capability… (VRAM + throughput test, up to 2 minutes)");
+      console.log("  Proving hardware capability… (VRAM + throughput test, up to 2 minutes)");
       try {
         const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "challenge.py");
-        out = JSON.parse(sh("python3", [script, c.nonce, String(c.vramGB)], 120_000).split("\n").pop());
+        out = JSON.parse(sh("python3", [script, nonce, String(vramGB)], 120_000).split("\n").pop());
       } catch { out = { ok: false, error: "challenge could not run on this machine" }; }
     }
+    out.nonce = nonce; // registry requires the echo on every result, skips included
     out.elapsedMs = Date.now() - started;
     const verdict = await fetch(`${REGISTRY_URL}/challenge`, {
       method: "POST", body: JSON.stringify({ operator, result: out, sig: await box.signMessage(JSON.stringify(out)) }),
     }).then((r) => r.json()).catch(() => null);
-    if (quiet && verdict?.pass !== false) return; // periodic re-checks only speak up on bad news
     if (verdict?.skipped) console.log("  Challenge  skipped — needs Python + PyTorch (pip install torch)");
     else if (verdict?.pass) console.log(`  Challenge  ✓ ${out.tflopsMedian} TFLOP/s · ${out.memBwTBs} TB/s · ${out.vramAllocGB}GB proven`);
     else console.log(`  Challenge  ✗ ${verdict?.reason ?? "no verdict"} — weight demoted`);
@@ -256,7 +300,6 @@ async function cmdStart(operatorArg) {
       method: "POST", body: JSON.stringify({ operator, payload, sig: await box.signMessage(JSON.stringify(payload)) }),
     }).catch(() => null);
     if (!r?.ok) console.log("  ! heartbeat failed — retrying");
-    if (seq > 0 && seq % 75 === 0) await runChallenge(true);
     await sleep(4000);
   }
 }
@@ -267,8 +310,13 @@ async function cmdOff() {
   const conf = readConf();
   let killed = false;
   try {
-    process.kill(Number(readFileSync(PID_FILE, "utf8")));
-    killed = true;
+    // parse + validate: an empty/garbage pid file must never become kill(0),
+    // which SIGTERMs the whole process group
+    const pid = parseInt(readFileSync(PID_FILE, "utf8"), 10);
+    if (Number.isInteger(pid) && pid > 0) {
+      process.kill(pid);
+      killed = true;
+    }
   } catch { /* not running or stale pid */ }
   try { unlinkSync(PID_FILE); } catch { /* absent */ }
   // signed offline notice from here too — on Windows a killed process can't send its own
